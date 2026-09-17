@@ -76,7 +76,7 @@ class MainActivity : Activity() {
         }
 
         val scroll = ScrollView(this).apply {
-            addView(output, ScrollView.LayoutParams(
+            addView(output, ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
