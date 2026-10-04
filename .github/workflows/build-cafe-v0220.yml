@@ -1,0 +1,115 @@
+name: Build Cafe Curator v0.2.20 GPU APK
+
+on:
+  push:
+    branches:
+      - chatgpt-apk-v0220-20261004
+    paths:
+      - ".github/workflows/build-cafe-v0220.yml"
+      - "chatgpt-build/v0220_builder.b64"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout temporary build branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: microsoft
+          java-version: "21"
+
+      - name: Decode builder payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $b64 = (Get-Content -LiteralPath "chatgpt-build/v0220_builder.b64" -Raw).Trim()
+          [IO.File]::WriteAllBytes("builder.tar.xz", [Convert]::FromBase64String($b64))
+          python -c "import tarfile; tarfile.open('builder.tar.xz','r:xz').extractall('.')"
+          Get-Content "CafeCuratorAI_OneClickBuilder_v0.2.20_GPU\VERSION.txt"
+
+      - name: Ensure Android SDK packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:ANDROID_HOME) { throw "ANDROID_HOME is not set on the runner." }
+          $sdkmanager = Join-Path $env:ANDROID_HOME "cmdline-tools\latest\bin\sdkmanager.bat"
+          if (-not (Test-Path $sdkmanager)) {
+            $sdkmanager = (Get-ChildItem (Join-Path $env:ANDROID_HOME "cmdline-tools") -Filter sdkmanager.bat -Recurse | Select-Object -First 1).FullName
+          }
+          if (-not $sdkmanager) { throw "sdkmanager.bat not found." }
+          & $sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.13113456" "cmake;3.31.6"
+          if ($LASTEXITCODE -ne 0) { throw "sdkmanager failed: $LASTEXITCODE" }
+          "ANDROID_SDK_ROOT=$env:ANDROID_HOME" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vk = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $vk) {
+            $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+            if ($winget) {
+              & $winget.Source install -e --id KhronosGroup.VulkanSDK --accept-package-agreements --accept-source-agreements --silent --disable-interactivity
+              if ($LASTEXITCODE -ne 0) { Write-Warning "winget Vulkan SDK install returned $LASTEXITCODE" }
+            }
+          }
+          $vk = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $vk) { choco install vulkan-sdk -y --no-progress }
+          $vk = Get-ChildItem "C:\VulkanSDK" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $vk) { throw "Vulkan SDK install failed." }
+          "VULKAN_SDK=$($vk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build v0.2.20 GPU APK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-Location "CafeCuratorAI_OneClickBuilder_v0.2.20_GPU"
+          $env:BUILDER_NOPAUSE = "1"
+          powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\build_all.ps1"
+          if ($LASTEXITCODE -ne 0) { throw "Builder failed with exit code $LASTEXITCODE" }
+
+      - name: Verify APK
+        shell: pwsh
+        run: |
+          $apk = Get-ChildItem "CafeCuratorAI_OneClickBuilder_v0.2.20_GPU\output\*.apk" | Select-Object -First 1
+          if (-not $apk) { throw "APK not found." }
+          Write-Host "APK=$($apk.FullName)"
+          Write-Host "SIZE=$($apk.Length)"
+          Get-FileHash -Algorithm SHA256 $apk.FullName
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z=[IO.Compression.ZipFile]::OpenRead($apk.FullName)
+          try {
+            $vk=$z.Entries | Where-Object FullName -eq "lib/arm64-v8a/libggml-vulkan.so"
+            if (-not $vk) { throw "libggml-vulkan.so missing from APK" }
+            Write-Host "VULKAN_ENTRY=$($vk.FullName) SIZE=$($vk.Length)"
+          } finally { $z.Dispose() }
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cafe-Curator-AI-v0.1.5-v0.2.20-GPU-APK
+          path: CafeCuratorAI_OneClickBuilder_v0.2.20_GPU/output/*.apk
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cafe-Curator-v0.2.20-build-logs
+          path: CafeCuratorAI_OneClickBuilder_v0.2.20_GPU/logs/**
+          if-no-files-found: ignore
+          retention-days: 3
